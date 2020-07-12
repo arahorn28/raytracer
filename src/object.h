@@ -11,9 +11,19 @@
 #include "LuaBridge/RefCountedPtr.h"
 #endif
 
+#include <limits>
 #include <algorithm>
+#include <stack>
 #define _USE_MATH_DEFINES
 #include <math.h>
+
+//#define BOUNDING_BOX
+#define OBJECT_BOUNDING_TREE
+
+#define VERTEX_IN_BOUNDS(v, minv, maxv) \
+	((v)[0] >= (minv)[0] &&  (v)[1] >= (minv)[1] && (v)[2] >= (minv)[2] &&  \
+	(v)[0] <= (maxv)[0] && (v)[1] <= (maxv)[1] && (v)[2] <= (maxv)[2])
+
 
 // Struct that holds information about intersection
 struct Intersection
@@ -23,15 +33,268 @@ struct Intersection
 	Vector2f tex;		// Texture coordinates
 };
 
-// TODO
-struct BoundingBox
+struct VertexIndices {
+	int vertex_index;
+	int normal_index;
+	int texcoord_index;
+};
+
+
+class BoundingBox
 {
 	Vector3f min;
 	Vector3f max;
 
-	void resize(const Vector3f &a, const Vector3f &b, const Vector3f &c)
+	std::vector <size_t> indices;
+
+	BoundingBox* left;
+	BoundingBox* right;
+
+	// Merge two sorted vectors with removal of duplicates
+	static std::vector <size_t> merge(const std::vector<size_t>& v1, const std::vector<size_t>& v2)
 	{
-		// TODO
+		std::vector <size_t> res;
+		size_t i1 = 0, i2 = 0;
+		size_t s1 = v1.size(), s2 = v2.size();
+		if (s1 == 0)
+		{
+			res.reserve(s2);
+			std::copy(v2.cbegin(), v2.cend(), std::back_inserter(res));
+			return res;
+		}
+		if (s2 == 0)
+		{
+			res.reserve(s1);
+			std::copy(v1.cbegin(), v1.cend(), std::back_inserter(res));
+			return res;
+		}
+		while (true)
+		{
+			if (v1[i1] < v2[i2])
+			{
+				res.push_back(v1[i1]);
+				++i1;
+				if (i1 == s1)
+				{
+					std::copy(v2.cbegin() + i2, v2.cend(), std::back_inserter(res));
+					return res;
+				}
+			}
+			else if (v1[i1] > v2[i2])
+			{
+				res.push_back(v2[i2]);
+				++i2;
+				if (i2 == s2)
+				{
+					std::copy(v1.cbegin() + i1, v1.cend(), std::back_inserter(res));
+					return res;
+				}
+			}
+			else
+			{
+				res.push_back(v1[i1]);
+				++i1;
+				++i2;
+				if (i1 == s1)
+				{
+					std::copy(v2.cbegin() + i2, v2.cend(), std::back_inserter(res));
+					return res;
+				}
+				if (i2 == s2)
+				{
+					std::copy(v1.cbegin() + i1, v1.cend(), std::back_inserter(res));
+					return res;
+				}
+			}
+		}
+	}
+
+public:
+	enum class Axis : size_t { X = 0, Y = 1, Z = 2 };
+
+	BoundingBox() :
+		min(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()),
+		max(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()),
+		left(nullptr),
+		right(nullptr)
+	{
+
+	}
+
+	BoundingBox(Vector3f min, Vector3f max) :
+		min(min),
+		max(max),
+		left(nullptr),
+		right(nullptr)
+	{
+
+	}
+
+	~BoundingBox()
+	{
+		if (left != nullptr)
+			delete left;
+		if (right != nullptr)
+			delete right;
+	}
+
+	void addIndices(Axis axis, const std::vector <size_t>& indices,
+		const std::vector <VertexIndices>& vertexIndices, const std::vector <Vector3f>& vertices)
+	{
+		if (indices.size() <= 50)
+		{
+			this->indices = indices;
+			return;
+		}
+		Vector3f midBottom{ min }, midTop{ max };
+		midBottom[static_cast<size_t>(axis)] =
+			(midBottom[static_cast<size_t>(axis)] + max[static_cast<size_t>(axis)]) / 2.f;
+		midTop[static_cast<size_t>(axis)] =
+			(midTop[static_cast<size_t>(axis)] + min[static_cast<size_t>(axis)]) / 2.f;
+
+		std::vector <size_t> leftBoxIndices, rightBoxIndices;
+		// Make actual size of children boxes a little bit bigger along the current axis
+		float axisExtension = std::fabs((min[static_cast<size_t>(axis)] + max[static_cast<size_t>(axis)]) * 0.005f / 2.f);
+		Vector3f minExtended{ min };
+		Vector3f maxExtended{ max };
+		Vector3f midBottomExtended{ midBottom };
+		Vector3f midTopExtended{ midTop };
+		minExtended[static_cast<size_t>(axis)] -= axisExtension;
+		maxExtended[static_cast<size_t>(axis)] += axisExtension;
+		midBottomExtended[static_cast<size_t>(axis)] -= axisExtension;
+		midTopExtended[static_cast<size_t>(axis)] += axisExtension;
+		for (size_t i = 0; i < indices.size(); ++i)
+		{
+			const Vector3f v1 = vertices[vertexIndices[indices[i]].vertex_index],
+				v2 = vertices[vertexIndices[indices[i] + 1].vertex_index],
+				v3 = vertices[vertexIndices[indices[i] + 2].vertex_index];
+
+			if (VERTEX_IN_BOUNDS(v1, minExtended, midTopExtended) ||
+				VERTEX_IN_BOUNDS(v2, minExtended, midTopExtended) ||
+				VERTEX_IN_BOUNDS(v3, minExtended, midTopExtended))
+			{
+				leftBoxIndices.push_back(indices[i]);
+			}
+			if (VERTEX_IN_BOUNDS(v1, midBottomExtended, maxExtended) ||
+				VERTEX_IN_BOUNDS(v2, midBottomExtended, maxExtended) ||
+				VERTEX_IN_BOUNDS(v3, midBottomExtended, maxExtended))
+			{
+				rightBoxIndices.push_back(indices[i]);
+			}
+		}
+		left = new BoundingBox(minExtended, midTopExtended);
+		right = new BoundingBox(midBottomExtended, maxExtended);
+		// Recursive tree construction
+		left->addIndices(Axis{ (static_cast<size_t>(axis) + 1) % 3 }, leftBoxIndices, vertexIndices, vertices);
+		right->addIndices(Axis{ (static_cast<size_t>(axis) + 1) % 3 }, rightBoxIndices, vertexIndices, vertices);
+	}
+
+	// Expand box to cantain given point
+	void expand(const Vector3f& point)
+	{
+		for (size_t i = 0; i < 3; ++i)
+		{
+			if (point[i] < min[i])
+				min[i] = point[i];
+			if (point[i] > max[i])
+				max[i] = point[i];
+		}
+	}
+
+	// Test if ray intersects box
+	bool intersects(const Ray& ray) const
+	{
+		Vector3f min, max;
+		Vector3f inv{ 1 / ray.dir[0], 1 / ray.dir[1], 1 / ray.dir[2] };
+
+		if (inv[0] < 0.f)
+		{
+			min[0] = (this->max[0] - ray.pos[0]) * inv[0];
+			max[0] = (this->min[0] - ray.pos[0]) * inv[0];
+		}
+		else
+		{
+			min[0] = (this->min[0] - ray.pos[0]) * inv[0];
+			max[0] = (this->max[0] - ray.pos[0]) * inv[0];
+		}
+
+		if (inv[1] < 0.f)
+		{
+			min[1] = (this->max[1] - ray.pos[1]) * inv[1];
+			max[1] = (this->min[1] - ray.pos[1]) * inv[1];
+		}
+		else
+		{
+			min[1] = (this->min[1] - ray.pos[1]) * inv[1];
+			max[1] = (this->max[1] - ray.pos[1]) * inv[1];
+		}
+
+		if ((min[0] > max[1]) || (min[1] > max[0]))
+			return false;
+		if (min[1] > min[0])
+			min[0] = min[1];
+		if (max[1] < max[0])
+			max[0] = max[1];
+
+		if (inv[2] < 0.f)
+		{
+			min[2] = (this->max[2] - ray.pos[2]) * inv[2];
+			max[2] = (this->min[2] - ray.pos[2]) * inv[2];
+		}
+		else
+		{
+			min[2] = (this->min[2] - ray.pos[2]) * inv[2];
+			max[2] = (this->max[2] - ray.pos[2]) * inv[2];
+		}
+
+		if ((min[0] > max[2]) || (min[2] > max[0]))
+			return false;
+		if (min[2] > min[0])
+			min[0] = min[2];
+		if (max[2] < max[0])
+			max[0] = max[2];
+
+		if (min[0] < 0)
+		{
+			if (max[0] < 0)
+				return false;
+		}
+
+		return true;
+	}
+
+	// Get all polygons that are contained in boxes intersected by a ray.
+	// Returns pair where first member is pointer to vector of indices and second 
+	// is boolean that says if vector can be deleted by the caller
+	std::pair <std::vector <size_t>*, bool> traverse(const Ray& ray)
+	{
+		if (left == nullptr)
+			return { &indices, false };
+
+		std::stack <BoundingBox*> boxes;
+		boxes.push(this);
+		std::vector <size_t> res;
+		
+		while (!boxes.empty())
+		{
+			BoundingBox* box = boxes.top();
+			boxes.pop();
+			if (box->intersects(ray))
+			{
+				if (box->left == nullptr && box->right == nullptr)
+				{
+					res = merge(res, box->indices);
+				}
+				else
+				{
+					boxes.push(box->left);
+					boxes.push(box->right);
+				}
+			}
+		}
+		std::vector <size_t> *temp = new std::vector <size_t>();
+		temp->swap(res);
+		return { temp, true };
 	}
 };
 
@@ -67,7 +330,7 @@ public:
 	{
 #ifdef LUA_BINDING_OFF
 		delete material;
-#endif 
+#endif
 	}
 
 	virtual std::pair <bool, Intersection> intersection(const Ray &ray) = 0;
@@ -104,6 +367,7 @@ public:
 		material = mat;
 	}
 };
+
 
 class Sphere : public Object
 {
@@ -168,19 +432,17 @@ public:
 	}
 };
 
+
 class Mesh : public Object
 {
 private:
-	struct Index {
-		int vertex_index;
-		int normal_index;
-		int texcoord_index;
-	};
-
 	std::vector <Vector3f> vertices;
 	std::vector <Vector3f> normals;
 	std::vector <Vector2f> texcoords;
-	std::vector <Index> indices;
+	std::vector <VertexIndices> indices;
+#if defined(BOUNDING_BOX) || defined(OBJECT_BOUNDING_TREE)
+	BoundingBox box;
+#endif
 
 	template <size_t N>
 	static std::vector <Vector <float, N>> toVector(const std::vector <float> &vec)
@@ -199,6 +461,9 @@ public:
 
 	Mesh(const std::string &filename, Material *mat, const Matrix4f &transform = Matrix4f(), const Matrix4f &inverse = Matrix4f()) :
 		Object(mat, transform, inverse)
+#if defined(BOUNDING_BOX) || defined(OBJECT_BOUNDING_TREE)
+		//, box(new BoundingBox())
+#endif
 	{
 		//Load obj
 		std::string err;
@@ -222,12 +487,34 @@ public:
 		{
 			for (size_t j = 0; j < shapes[i].mesh.indices.size(); ++j)
 			{
-				indices.push_back(Mesh::Index{
+				indices.push_back(VertexIndices{
 					shapes[i].mesh.indices[j].vertex_index,
 					shapes[i].mesh.indices[j].normal_index,
 					shapes[i].mesh.indices[j].texcoord_index });
 			}
 		}
+#if defined(BOUNDING_BOX) || defined(OBJECT_BOUNDING_TREE)
+		for (size_t i = 0; i < indices.size(); ++i)
+		{
+			box.expand(vertices[indices[i].vertex_index]);
+		}
+#ifdef OBJECT_BOUNDING_TREE
+		std::vector <size_t> vertexIndices;
+		vertexIndices.reserve(indices.size() / 3);
+		for (size_t i = 0; i < indices.size(); i += 3)
+		{
+			vertexIndices.push_back(i);
+		}
+		box.addIndices(BoundingBox::Axis::X, vertexIndices, indices, vertices);
+#endif // OBJECT_BOUNDING_TREE
+#endif // BOUNDING_BOX
+	}
+	
+	virtual ~Mesh()
+	{
+#if defined(BOUNDING_BOX) || defined(OBJECT_BOUNDING_TREE)
+		//delete box;
+#endif
 	}
 
 	virtual std::pair <bool, Intersection> intersection(const Ray &original)
@@ -236,13 +523,36 @@ public:
 		// Expand dir to Vector4f with 0 as last element to ignore translation
 		const Vector3f dir = inverseTransform * Vector4f{ original.dir, 0.f };
 
+#ifdef BOUNDING_BOX
+#ifndef OBJECT_BOUNDING_TREE
+		if (!box.intersection({pos, dir}))
+		{
+			return { false, Intersection() };
+		}
+#endif
+#endif // BOUNDING_BOX
+#ifdef OBJECT_BOUNDING_TREE
+		auto [possibleVertices, del] = box.traverse({ pos, dir });
+		if (possibleVertices->empty())
+		{
+			return { false, Intersection() };
+		}
+#endif // OBJECT_BOUNDING_TREE
+
 		float t_min = -1.f;
 		float uf = 0.f;
 		float vf = 0.f;
 		size_t ind = 0;
 
+#ifdef OBJECT_BOUNDING_TREE
+		for (size_t j = 0, i; j < possibleVertices->size(); ++j)
+		{
+			i = possibleVertices->at(j);
+#else
 		for (size_t i = 0; i < indices.size(); i += 3)
 		{
+#endif
+		
 			const Vector3f &A = vertices[indices[i].vertex_index];
 
 			Vector3f E1 = vertices[indices[i + 1].vertex_index] - A;
@@ -281,7 +591,11 @@ public:
 				ind = i;
 			}
 		}
-
+#ifdef OBJECT_BOUNDING_TREE
+		if (del)
+			delete possibleVertices;
+#endif
+		
 		if (t_min < 0.f)
 			return { false, Intersection() };
 
