@@ -81,8 +81,8 @@ struct MaterialTextured : public Material
 
 	virtual Color getColor(const Vector2f &coord) const
 	{
-		size_t x = static_cast <size_t>(coord[0] * width);
-		size_t y = static_cast <size_t>(coord[1] * height);
+		size_t x = static_cast <size_t>(static_cast <int>(coord[0] * width));
+		size_t y = static_cast <size_t>(static_cast <int>(coord[1] * height));
 		x %= width;
 		y %= height;
 
